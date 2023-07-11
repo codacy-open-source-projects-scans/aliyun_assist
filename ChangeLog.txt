@@ -1,0 +1,106 @@
+﻿2023-7
+v2.x.x.453
+1. 脚本落盘失败时直接执行脚本内容并上报该事件
+2. 优化inventory访问metaserver接口的频率 
+3. 修复由于installed_plugins为空文件导致插件执行失败的问题
+
+2023-5
+v2.x.x.421
+1. 支持常驻插件自动检查升级
+2. 优化托管实例注册，支持tag参数 
+3. 支持创建加密参数以支持WindowsPassword加密 
+4. 修复启动后处理gshell时可能死锁的问题
+
+2023-2
+v2.x.x.398
+1. 基于grpc实现aliyun-service程序的命令行进程与服务进程的通信,实现通过命令行创建rsa秘钥和对文本数据加解密功能
+2. 增加对本地插件列表的上报
+
+2022-11
+v2.x.x.372
+1. 支持使用docker api直接在docker容器中执行命令 
+2. 上报 nvme 版本号 
+3. 将捆绑的 netchecker 的源代码从其他存储库移至此处 
+4. acs-plugin-manager 细化linux下执行的错误码
+
+2022-8
+v2.x.x.349
+1. 完善对常住插件的支持，增加常住插件状态上报功能 
+2. 支持通过CRI在k8s容器内执行命令 
+
+v2.x.x.317
+执行命令支持特定退出码触发系统关机/重启
+插件管理模块替换成golang重构版
+支持session manager限流
+增加kdump及pagefile metrics
+
+2022-1
+v2.x.x.256
+支持ssh over session manager
+
+2021-7
+v2.x.x.221
+1 支持终端会话
+2 支持本地环境变量
+3 修复bug
+
+2021-3
+v2.x.x.106
+1 超时优化
+2 增加异常上报
+3 修复bug
+
+2020-12
+v2.x.0.70
+1 golang重构
+2 性能增强
+3 兼容性增强
+
+
+2020-9
+1.0.2.569
+1 支持心跳打散
+2 支持sendfile功能
+3 支持5xx网络错误重试
+4 支持解决windows字符乱码
+
+2020-8
+1.0.2.510
+1 支持插件功能
+2 支持websocket协议
+3 支持动态心跳
+4 支持自定义脚本
+
+2020-7
+1.0.2.497
+1 支持websocket通道
+
+2020-6
+1.0.2.458
+1 支持动态心跳
+
+2020-4
+Linux Version:1.0.1.451
+1 提高稳定性
+2 优化资源占用问题
+
+2017-11-21 
+Linux Version: 1.0.1.168
+Windows Version: 1.0.0.81
+1  支持部分旧的镜像ACPI模式关机
+2  支持Windows Server 1709
+
+2018-1-5
+Linux Version 1.0.1.187
+Windows Version: 1:0.0.94
+增加超时机制上报和kill进程机制
+
+2019-5-7
+Linux Version 1.0.1.346
+Windows Version: 1:0.0.127
+增加对神龙服务器的支持
+不再agentwatch脚本启动云助手
+Fix任务执行上报结果的bug
+
+
+
