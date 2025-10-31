@@ -1,0 +1,179 @@
+﻿2025-05-09
+v2.x.x.941
+1. 支持对任务的命令内容进行签名验证
+2. 保证第一次成功的task/list是reason=startup 
+4. update_check接口增加字段distribution以识别来自android环境的请求
+6. 修复终止任务失败时task/stopped请求里的errCode和errDesc缺失的问题
+7. 服务端对http post请求返回instance_deregisted时Agent清除hybrid目录完成注销
+8. 修复acs-plugin-manager日志报错污染插件输出内容 
+9. 升级部分依赖的package
+
+2024-12-04
+v2.x.x.857
+1. 整合从 metaserver 加载服务端相关信息的代码到云助手程序中 
+2. 使用新的配置文件统一管理Agent的配置项 
+3. 支持并发任务数上限可配置 
+4. 任务结束后主动清理任务脚本
+5. 支持是否启用守护进程、是否关闭预置域名轮询逻辑可配置
+6. 支持创建更长的加密参数
+7. data-encryption子命令新增签名验签功能
+8.修复含中文powershell脚本执行失败 
+9.修复sessionmanager代理ssh连接结束后本地ssh连接未释放
+
+2024-08
+v2.x.x.631
+1. 支持指定脚本执行的引导程序
+2. 容器内执行命令组件化
+3. StopInvocation支持以进程树终止任务进程
+4. sessionmanager支持root登录
+5. ali-instance-cli端口转发支持指定ip
+6. 使用ringbuffer接收任务输出内容 
+7. task/xxx接口返回任务状态错误时Agent对异常任务进行处理 
+8. 支持通过kick_vm指令快速回滚/升级 
+9. 通过心跳感知网络从不通变为通的事件并尝试重新建立gshell/websocket通道
+
+2024-01
+v2.x.x.578
+1. 命令执行时支持修改执行信息
+2. 支持selfhost场景注册托管实例
+3. 更新时优先使用本地已存在的版本目录 
+4. 在Windows下将脚本中的换行符都规范为 CRLF 
+5. 优化Agent panic信息的查找逻辑 
+6. http请求报证书错误时重新加载证书 
+7. gshell kick_vm超频时打开wss
+8. 升级golang版本到1.20.10
+
+2023-11
+v2.x.x.529
+1. Windows下升级时优先替换服务的binpath，避免服务重新安装
+2. 心跳支持http/https协议切换 
+3. 修复云助手任务的stdout/stderr输出乱序问题 
+4. 支持为实例打上插件标签 
+5. 托管实例下服务端域名切换 
+6. 日志中增加进程pid字段 
+7. 其他问题修复
+
+2023-09
+v2.x.x.515
+1. agent上报自身panic信息 
+2. SessionManager端口转发支持指定host 
+3. 试验性支持需要与终端进行交互的云助手插件 
+4. 修复windows环境下由于升级过程中无法停止服务导致实例重启后服务被删除的问题 
+5. 优化agent上报实例宕机信息的逻辑 
+6. 其他问题修复和代码优化
+
+2023-08
+v2.x.x.499
+1. 适配freebsd实例 
+2. acs-plugin-manager：exec模式下支持安装插件超时限制和基于细粒度锁的并发保护 
+4. 修复aliyun-service、acs-plugin-manager等程序并发执行时多个进程同时创建新的日志文件报错，污染正常的输出信息 
+5. 修复专有云环境下注册托管实例是无法从环境变量获取正确的服务端域名问题 
+6. 修复sessionmanager创建sudoer文件时文件权限漏洞 
+7. 升级golang版本到1.19.10，升级部分依赖包
+
+2023-7
+v2.x.x.453
+1. 脚本落盘失败时直接执行脚本内容并上报该事件
+2. 优化inventory访问metaserver接口的频率 
+3. 修复由于installed_plugins为空文件导致插件执行失败的问题
+
+2023-5
+v2.x.x.421
+1. 支持常驻插件自动检查升级
+2. 优化托管实例注册，支持tag参数 
+3. 支持创建加密参数以支持WindowsPassword加密 
+4. 修复启动后处理gshell时可能死锁的问题
+
+2023-2
+v2.x.x.398
+1. 基于grpc实现aliyun-service程序的命令行进程与服务进程的通信,实现通过命令行创建rsa秘钥和对文本数据加解密功能
+2. 增加对本地插件列表的上报
+
+2022-11
+v2.x.x.372
+1. 支持使用docker api直接在docker容器中执行命令 
+2. 上报 nvme 版本号 
+3. 将捆绑的 netchecker 的源代码从其他存储库移至此处 
+4. acs-plugin-manager 细化linux下执行的错误码
+
+2022-8
+v2.x.x.349
+1. 完善对常住插件的支持，增加常住插件状态上报功能 
+2. 支持通过CRI在k8s容器内执行命令 
+
+v2.x.x.317
+执行命令支持特定退出码触发系统关机/重启
+插件管理模块替换成golang重构版
+支持session manager限流
+增加kdump及pagefile metrics
+
+2022-1
+v2.x.x.256
+支持ssh over session manager
+
+2021-7
+v2.x.x.221
+1 支持终端会话
+2 支持本地环境变量
+3 修复bug
+
+2021-3
+v2.x.x.106
+1 超时优化
+2 增加异常上报
+3 修复bug
+
+2020-12
+v2.x.0.70
+1 golang重构
+2 性能增强
+3 兼容性增强
+
+
+2020-9
+1.0.2.569
+1 支持心跳打散
+2 支持sendfile功能
+3 支持5xx网络错误重试
+4 支持解决windows字符乱码
+
+2020-8
+1.0.2.510
+1 支持插件功能
+2 支持websocket协议
+3 支持动态心跳
+4 支持自定义脚本
+
+2020-7
+1.0.2.497
+1 支持websocket通道
+
+2020-6
+1.0.2.458
+1 支持动态心跳
+
+2020-4
+Linux Version:1.0.1.451
+1 提高稳定性
+2 优化资源占用问题
+
+2017-11-21 
+Linux Version: 1.0.1.168
+Windows Version: 1.0.0.81
+1  支持部分旧的镜像ACPI模式关机
+2  支持Windows Server 1709
+
+2018-1-5
+Linux Version 1.0.1.187
+Windows Version: 1:0.0.94
+增加超时机制上报和kill进程机制
+
+2019-5-7
+Linux Version 1.0.1.346
+Windows Version: 1:0.0.127
+增加对神龙服务器的支持
+不再agentwatch脚本启动云助手
+Fix任务执行上报结果的bug
+
+
+

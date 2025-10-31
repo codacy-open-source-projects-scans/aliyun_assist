@@ -1,0 +1,266 @@
+package hybrid
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/aliyun/aliyun_assist_client/agent/hybrid/instance"
+	"github.com/aliyun/aliyun_assist_client/agent/log"
+	"github.com/aliyun/aliyun_assist_client/agent/metrics"
+	"github.com/aliyun/aliyun_assist_client/agent/util"
+	"github.com/aliyun/aliyun_assist_client/agent/util/osutil"
+	"github.com/aliyun/aliyun_assist_client/agent/util/serviceutil"
+	"github.com/aliyun/aliyun_assist_client/agent/version"
+	"github.com/aliyun/aliyun_assist_client/common/apiserver"
+	"github.com/aliyun/aliyun_assist_client/common/httpbase"
+	"github.com/aliyun/aliyun_assist_client/common/metaserver"
+	"github.com/aliyun/aliyun_assist_client/thirdparty/sirupsen/logrus"
+	"golang.org/x/net/http/httpguts"
+)
+
+const (
+	errCodeFingerprintDuplicate = "fingerprint_duplicate"
+	errCodeEcsRegDisabled       = "ecs_registration_disabled"
+)
+
+func Register(region string, code string, id string, name string, networkmode string, need_restart bool, tags []Tag) (ret bool) {
+	logger := log.GetLogger().WithField("action", "register")
+	logger.Infoln(region, code, id, name)
+
+	if instance.IsHybrid() {
+		fmt.Println("error, agent already register, deregister first")
+		logger.Infoln("error, agent already register, deregister first")
+		return
+	}
+	ret = false
+	hostname, _ := os.Hostname()
+	osType := osutil.GetOsType()
+
+	defer func() {
+		if ret {
+			metrics.GetHybridRegisterEvent().ReportEventSync()
+		}
+	}()
+
+	// Try to get instanceId from metaserver.
+	instanceCh := make(chan string)
+	go func() {
+		// Default timeout in GetInstanceId() is 5 seconds. It's too long.
+		instanceId, err := metaserver.GetInstanceId(logger, httpbase.WithTimeoutInSeconds(2))
+		if err != nil {
+			instanceId = ""
+		}
+		instanceCh <- instanceId
+	}()
+
+	ip, _ := osutil.ExternalIP()
+	var pub, pri bytes.Buffer
+	err := genRsaKey(&pub, &pri)
+	if err != nil {
+		fmt.Println("error, generate rsa key failed")
+		return
+	}
+	encodeString := base64.StdEncoding.EncodeToString(pub.Bytes())
+	mid, _ := instance.MachineID()
+	fingerprint, err := instance.GenerateFingerprint()
+	if err != nil {
+		fmt.Printf("generate fingerprint failed: %v", err)
+		return
+	}
+	info := &RegisterInfo{
+		Code:            code,
+		MachineId:       mid,
+		Fingerprint:     fingerprint,
+		RegionId:        region,
+		InstanceName:    name,
+		Hostname:        hostname,
+		IntranetIp:      ip.String(),
+		OsVersion:       osutil.GetVersion(),
+		OsType:          osType,
+		ClientVersion:   version.AssistVersion,
+		PublicKeyBase64: encodeString,
+		Id:              id,
+		Tag:             tags,
+	}
+
+	headers := make(map[string]string)
+	// Put instanceId into headers if it exists.
+	instanceId := <-instanceCh
+	if len(instanceId) > 0 && len(instanceId) <= 32 && httpguts.ValidHeaderFieldValue(instanceId) {
+		headers["X-Client-Instance-ID"] = instanceId
+	} else {
+		logger.Info("invalid ecs instanceId: ", instanceId)
+		headers["X-Client-Instance-ID"] = "unknown"
+	}
+
+	resp, err := doRegister(info, networkmode, headers)
+	if err != nil {
+		fmt.Println("Register failed: ", err)
+		return
+	}
+	if resp.Code == 200 {
+		instance.SaveInstanceInfo(resp.InstanceId, fingerprint, region, pub.String(), pri.String(), networkmode)
+	} else if resp.ErrCode == errCodeEcsRegDisabled {
+		fmt.Println("The ECS instance is forbidden from registering as a managed instance.")
+		return
+	} else if resp.ErrCode == errCodeFingerprintDuplicate {
+		fmt.Println("Fingerprint is duplicated and needs to be regenerated")
+		fingerprint, err = instance.GenerateFingerprintIgnoreSavedHash()
+		if err != nil {
+			fmt.Println("Regenerate fingerprint failed: ", err)
+			return
+		}
+		info.Fingerprint = fingerprint
+		resp, err = doRegister(info, networkmode, headers)
+		if err == nil && resp.Code == 200 {
+			instance.SaveInstanceInfo(resp.InstanceId, fingerprint, region, pub.String(), pri.String(), networkmode)
+		} else {
+			fmt.Println("Register failed: ", err, resp)
+			return
+		}
+	} else {
+		fmt.Println("Register failed: ", resp)
+		return
+	}
+
+	fmt.Println("register ok")
+	fmt.Println("instance id:", resp.InstanceId)
+	if need_restart {
+		serviceutil.RestartAgentService(logger)
+	}
+	fmt.Println("restart service")
+	ret = true
+	return
+}
+
+func UnRegister(need_restart bool) bool {
+	logger := log.GetLogger().WithFields(logrus.Fields{
+		"action":       "deregister",
+		"need_restart": need_restart,
+	})
+	if !instance.IsHybrid() {
+		fmt.Println("There's no need to unregister it, as it is not a hybrid instance.")
+		return false
+	}
+	metrics.GetHybridUnregisterEvent().ReportEvent()
+
+	url := util.GetDeRegisterService()
+	logger.Info("deregister service url: ", url)
+	response, err := util.HttpPost(url, "", "")
+	if err != nil {
+		fmt.Println(response)
+	}
+	ret := true
+	var unregister_response unregisterResponse
+	if err := json.Unmarshal([]byte(response), &unregister_response); err == nil {
+		if unregister_response.Code == 200 {
+			ret = true
+		} else {
+			ret = false
+		}
+	}
+
+	if !ret {
+		fmt.Println("unregister failed")
+		fmt.Println(response)
+	} else {
+		fmt.Println("unregister ok")
+		clean_unregister_data(logger, need_restart)
+	}
+	return ret
+}
+
+// In previous versions, we used the fingerprint generated by the Agent itself as
+// the unique ID of hybrid instance and saved it in the hybrid/fingerprint file.
+// The hybrid/machine-id still stored the original ID, which caused ambiguity.
+// Now we discard the hybrid/fingerprint file and save the fingerprint directly to
+// the hybrid/machine-id file.
+// So we need to check the hybrid/fingerprint file. If it exists, copy the
+// fingerprint to hybrid/machind-id and delete the hybrid/fingerprint file.
+func CheckFingerprint() {
+	if !instance.IsHybrid() {
+		return
+	}
+	logger := log.GetLogger().WithField("phase", "CheckFingerprint")
+	fingerprint := instance.ReadDiscardFingerprintFile()
+	if fingerprint != "" {
+		logger.Infof("Move fingerprint[%s] from hybrid/fingerprint to hybrid/machine-id", fingerprint)
+		if err := instance.SaveFingerprint(fingerprint); err != nil {
+			logger.Errorf("Save fingerprint[%s] failed: %v", fingerprint, err)
+		} else {
+			instance.DeleteDiscardFingerprintFile()
+			logger.Infof("Save fingerprint[%s] success, delete discard fingerprint file", fingerprint)
+		}
+	}
+}
+
+func doRegister(info *RegisterInfo, networkmode string, headers map[string]string) (resp registerResponse, err error) {
+	jsonBytes, _ := json.Marshal(*info)
+	url := util.GetRegisterService(info.RegionId, networkmode)
+	log.GetLogger().Info("register service url: ", url)
+
+	content, err := apiserver.HttpPostWithSpecifiedHeader(log.GetLogger(), url, string(jsonBytes), "", headers)
+	if err != nil {
+		log.GetLogger().Info("register request failed: ", err)
+		return
+	}
+	err = json.Unmarshal([]byte(content), &resp)
+	return
+}
+
+// RSA公钥私钥产生
+func genRsaKey(pub io.Writer, pri io.Writer) error {
+	// 生成私钥文件
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+	derStream := x509.MarshalPKCS1PrivateKey(privateKey)
+	block := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: derStream,
+	}
+
+	err = pem.Encode(pri, block)
+	if err != nil {
+		return err
+	}
+	// 生成公钥文件
+	publicKey := &privateKey.PublicKey
+	derPkix, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return err
+	}
+	block = &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: derPkix,
+	}
+
+	err = pem.Encode(pub, block)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func clean_unregister_data(logger logrus.FieldLogger, need_restart bool) {
+	instance.RemoveInstanceInfo()
+	// update hardwareInfo and hope this instance will be recognized when next registration
+	if hardwareInfo, err := instance.ReadHardwareInfo(); err == nil {
+		if currentHardwareInfo, err := instance.CurrentHwHash(); err == nil {
+			instance.SaveHardwareInfo(hardwareInfo.Fingerprint, currentHardwareInfo)
+		}
+	}
+	if need_restart {
+		serviceutil.RestartAgentService(logger)
+		fmt.Println("restart service")
+	}
+}
