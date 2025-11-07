@@ -1,3 +1,5 @@
+//go:generate goversioninfo -o=resource_windows.syso
+
 // Copyright (c) 2009-present, Alibaba Cloud All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +20,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/aliyun/aliyun_assist_client/agent/flagging"
 	"github.com/aliyun/aliyun_assist_client/agent/log"
 	pm "github.com/aliyun/aliyun_assist_client/agent/pluginmanager/acspluginmanager"
 	"github.com/aliyun/aliyun_assist_client/agent/pluginmanager/acspluginmanager/flag"
@@ -33,6 +36,8 @@ func main() {
 	log.InitLog("acs_plugin_manager.log", "", true)
 	// If write log failed, do nothing
 	log.GetLogger().SetErrorCallback(func(error) {})
+	// Init config
+	flagging.InitConfig(log.GetLogger())
 	cli.PlatformCompatible()
 	writer := cli.DefaultWriter()
 
@@ -125,6 +130,7 @@ func execute(ctx *cli.Context, args []string) error {
 	if version {
 		fmt.Println(versioning.AssistVersion)
 	} else if list {
+		log.GetLogger().Infof("Listing all plugins")
 		exitCode, err = pluginManager.List(plugin, local)
 	} else if verify {
 		executeParams := &pm.ExecuteParams{

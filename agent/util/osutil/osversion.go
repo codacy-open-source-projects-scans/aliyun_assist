@@ -4,11 +4,16 @@ import (
 	"sync"
 )
 
+
+const (
+	distributionAndroid = "android"
+)
+
 var (
-	_initVersionOnce sync.Once
+	_initVersionOnce       sync.Once
 	_initKernelVersionOnce sync.Once
 
-	_version string
+	_version       string
 	_kernelVersion string
 )
 

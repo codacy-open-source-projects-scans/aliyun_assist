@@ -13,33 +13,30 @@ import (
 	"time"
 
 	"github.com/aliyun/aliyun_assist_client/thirdparty/sirupsen/logrus"
-	"github.com/kirinlabs/HttpRequest"
+
 	"github.com/tidwall/gjson"
+	"github.com/kirinlabs/HttpRequest"
 
 	"github.com/aliyun/aliyun_assist_client/agent/log"
-	"github.com/aliyun/aliyun_assist_client/agent/util/atomicutil"
-	_ "github.com/aliyun/aliyun_assist_client/common/apiserver"
+	"github.com/aliyun/aliyun_assist_client/common/httpbase"
+	"github.com/aliyun/aliyun_assist_client/common/httputil"
 	"github.com/aliyun/aliyun_assist_client/common/requester"
 )
 
-var (
-	NilRequest     *atomicutil.AtomicBoolean
-)
+type HTTPErrHandler func(resp *HttpRequest.Response, httpErr error)
 
 var (
 	ErrHTTPCode = errors.New("http code error")
+
+	httpPostErrHandler_ HTTPErrHandler
 )
 
-func init() {
-	NilRequest = &atomicutil.AtomicBoolean{}
-	NilRequest.Clear()
+// Try not to initiate new http requests in the handler to avoid circular calls.
+func SetHTTPPostErrHandler(handler HTTPErrHandler) {
+	httpPostErrHandler_ = handler
 }
 
 func GetHTTPTransport() *http.Transport {
-	if NilRequest.IsSet() {
-		return nil
-	}
-
 	return requester.GetHTTPTransport(log.GetLogger())
 }
 
@@ -47,52 +44,61 @@ func HttpGet(url string) (error, string) {
 	return HttpGetWithTimeout(url, 5, false)
 }
 
-func HttpGetWithTimeout(url string, timeout time.Duration, noLog bool) (error, string) {
-	req := HttpRequest.Transport(GetHTTPTransport())
+func HttpGetWithTimeout(url string, timeoutSecond int, noLog bool) (error, string) {
 	logger := log.GetLogger().WithFields(logrus.Fields{
-		"url": url,
-		"timeout": timeout.Seconds(),
+		"url":     url,
+		"timeout": timeoutSecond,
 	})
-	// 设置超时时间，不设置时，默认30s
-	req.SetTimeout(timeout)
-
-	// Add user-agent header
-	req.SetHeaders(map[string]string{
-		requester.UserAgentHeader: requester.UserAgentValue,
-	})
-	if extraHeaders, err := requester.GetExtraHTTPHeaders(log.GetLogger()); extraHeaders != nil {
-		req.SetHeaders(extraHeaders)
-	} else if err != nil {
-		log.GetLogger().WithError(err).Error("Failed to construct extra HTTP headers")
-	}
+	transport := GetHTTPTransport()
+	var extraHeaders map[string]string
+	var err error
+	extraHeaders, _ = requester.GetExtraHTTPHeaders(logger)
+	req := httputil.NewGetReq(logger, transport, timeoutSecond, extraHeaders)
 
 	res, err := req.Get(url)
 	if err != nil {
 		log.GetLogger().Infoln(url, err)
-		if errors.Is(err, x509.UnknownAuthorityError{}) {
-			logger.Info("certificate error, reload certificates and retry")
-			// req.Transport recv a *http.Transport, pass a copy of requester._httpTransport to it to prevent 
-			// requester._httpTransport being modified
-			req.Transport(requester.PeekHTTPTransport(logger))
-			certPool := requester.PeekRefreshedRootCAs(logger)
+		var certificateErr *tls.CertificateVerificationError
+		if !errors.As(err, &certificateErr) {
+			return err, ""
+		}
+
+		// tls.CertificateVerificationError encountered. Gonna re-accumulate
+		// root CA certificate pool and retry requesting.
+		// 1. Nil transport means working with net/http.defaultHTTPTransport
+		// which does not hold the custom pool. Give up retrying
+		if transport == nil {
+			return err, ""
+		}
+		logger.Info("certificate error, reload certificates and retry")
+		// 2. req.Transport recv a *http.Transport, pass a copy of
+		// requester._httpTransport to it to prevent requester._httpTransport
+		// being modified
+		transport = transport.Clone()
+		// 3. Re-accumulate root CAs and try
+		requester.AccumulateRootCAs(logger)(func(certPool *x509.CertPool) bool {
+			req = httputil.NewGetReq(logger, transport, timeoutSecond, extraHeaders)
 			req.SetTLSClient(&tls.Config{
 				RootCAs: certPool,
 			})
 			if res, err = req.Get(url); err == nil {
 				logger.Info("certificate updated")
 				requester.RefreshHTTPCas(logger, certPool)
-			} else {
-				log.GetLogger().Infoln(url, err)
-				return err, ""
+				return false
 			}
-		} else {
+
+			return true
+		})
+		// 4. Re-accumulation ends and error still exists. Give up and raise.
+		if err != nil {
+			log.GetLogger().Infoln(url, err)
 			return err, ""
 		}
 	}
 	defer res.Close()
 	content, _ := res.Content()
 	if err == nil && res.StatusCode() > 400 {
-		err = requester.NewHttpErrorCode(res.StatusCode())
+		err = httpbase.NewStatusCodeError(res.StatusCode())
 	}
 
 	if noLog {
@@ -108,75 +114,82 @@ func HttpPost(url string, data string, contentType string) (string, error) {
 	return HttpPostWithTimeout(url, data, contentType, 5, false)
 }
 
-func HttpPostWithTimeout(url string, data string, contentType string, timeout time.Duration, noLog bool) (string, error) {
-	req := HttpRequest.Transport(GetHTTPTransport())
+func HttpPostWithTimeout(url string, data string, contentType string, timeoutSecond int, noLog bool) (string, error) {
 	logger := log.GetLogger().WithFields(logrus.Fields{
-		"url": url,
-		"timeout": timeout.Seconds(),
+		"url":     url,
+		"timeout": timeoutSecond,
 	})
-	// 设置超时时间，不设置时，默认30s
-	req.SetTimeout(timeout)
+	transport := GetHTTPTransport()
+	var (
+		extraHeaders map[string]string
+		httpReqErr error
+		httpResp *HttpRequest.Response
+	)
+	defer func() {
+		if httpReqErr != nil && httpPostErrHandler_ != nil {
+			httpPostErrHandler_(httpResp, httpReqErr)
+		}
+	}()
 
-	req.SetHeaders(map[string]string{
-		requester.UserAgentHeader: requester.UserAgentValue,
-	})
-	if extraHeaders, err := requester.GetExtraHTTPHeaders(log.GetLogger()); extraHeaders != nil {
-		req.SetHeaders(extraHeaders)
-	} else if err != nil {
-		log.GetLogger().WithError(err).Error("Failed to construct extra HTTP headers")
-	}
+	extraHeaders, _ = requester.GetExtraHTTPHeaders(logger)
+	req := httputil.NewPostReq(logger, transport, contentType, timeoutSecond, extraHeaders)
 
-	// 设置Headers
-	if contentType == "text" {
-		req.SetHeaders(map[string]string{
-			"Content-Type": "text/plain; charset=utf-8", //这也是HttpRequest包的默认设置
-		})
-	} else {
-		req.SetHeaders(map[string]string{
-			"Content-Type": "application/json; charset=utf-8", //这也是HttpRequest包的默认设置
-		})
-	}
+	httpResp, httpReqErr = req.Post(url, data)
+	if httpReqErr != nil {
+		log.GetLogger().Infoln(url, httpReqErr)
+		var certificateErr *tls.CertificateVerificationError
+		if !errors.As(httpReqErr, &certificateErr) {
+			return "", httpReqErr
+		}
 
-	res, err := req.Post(url, data)
-
-	if err != nil {
-		log.GetLogger().Infoln(url, err)
-		if errors.Is(err, x509.UnknownAuthorityError{}) {
-			logger.Info("certificate error, reload certificates and retry")
-			// req.Transport recv a *http.Transport, pass a copy of requester._httpTransport to it to prevent 
-			// requester._httpTransport being modified
-			req.Transport(requester.PeekHTTPTransport(logger))
-			certPool := requester.PeekRefreshedRootCAs(logger)
+		// tls.CertificateVerificationError encountered. Gonna re-accumulate
+		// root CA certificate pool and retry requesting.
+		// 1. Nil transport means working with net/http.defaultHTTPTransport
+		// which does not hold the custom pool. Give up retrying
+		if transport == nil {
+			return "", httpReqErr
+		}
+		logger.Info("certificate error, reload certificates and retry")
+		// 2. req.Transport recv a *http.Transport, pass a copy of
+		// requester._httpTransport to it to prevent requester._httpTransport
+		// being modified
+		transport = transport.Clone()
+		// 3. Re-accumulate root CAs and try
+		requester.AccumulateRootCAs(logger)(func(certPool *x509.CertPool) bool {
+			req = httputil.NewPostReq(logger, transport, contentType, timeoutSecond, extraHeaders)
 			req.SetTLSClient(&tls.Config{
 				RootCAs: certPool,
 			})
-			if res, err = req.Get(url); err == nil {
+			if httpResp, httpReqErr = req.Post(url, data); httpReqErr == nil {
 				logger.Info("certificate updated")
 				requester.RefreshHTTPCas(logger, certPool)
-			} else {
-				log.GetLogger().Infoln(url, err)
-				return "", err
+				return false
 			}
-		} else {
-			return "", err
+
+			return true
+		})
+		// 4. Re-accumulation ends and error still exists. Give up and raise.
+		if httpReqErr != nil {
+			log.GetLogger().Infoln(url, httpReqErr)
+			return "", httpReqErr
 		}
 	}
 
-	defer res.Close()
-	content, _ := res.Content()
+	defer httpResp.Close()
+	content, _ := httpResp.Content()
 
-	if err == nil && res.StatusCode() > 400 {
-		err = requester.NewHttpErrorCode(res.StatusCode())
+	if httpReqErr == nil && httpResp.StatusCode() > 400 {
+		httpReqErr = httpbase.NewStatusCodeError(httpResp.StatusCode())
 	}
 
 	if noLog {
 		// API消息体过大默认不打INFO日志
-		log.GetLogger().Debugln(url, content, data, err)
+		log.GetLogger().Debugln(url, content, data, httpReqErr)
 	} else {
-		log.GetLogger().Infoln(url, content, data, err)
+		log.GetLogger().Infoln(url, content, data, httpReqErr)
 	}
-	return content, err
 
+	return content, httpReqErr
 }
 
 func HttpDownlod(url string, FilePath string) error {
@@ -242,7 +255,7 @@ func HttpDownloadWithTimeout(url string, filePath string, timeout time.Duration)
 		return err
 	}
 	if res.StatusCode != 200 {
-		return requester.NewHttpErrorCode(res.StatusCode)
+		return httpbase.NewStatusCodeError(res.StatusCode)
 	}
 
 	f, err := os.Create(filePath)
@@ -255,7 +268,7 @@ func HttpDownloadWithTimeout(url string, filePath string, timeout time.Duration)
 	return err
 }
 
-func CallApi(httpMethod, url string, parameters map[string]interface{}, respObj interface{}, apiTimeout time.Duration, noLog bool) error {
+func CallApi(httpMethod, url string, parameters map[string]interface{}, respObj interface{}, apiTimeoutSecond int, noLog bool) error {
 	var response string
 	var err error
 	if httpMethod == http.MethodGet {
@@ -272,16 +285,17 @@ func CallApi(httpMethod, url string, parameters map[string]interface{}, respObj 
 				}
 			}
 		}
-		err, response = HttpGetWithTimeout(url, apiTimeout, noLog)
+		err, response = HttpGetWithTimeout(url, apiTimeoutSecond, noLog)
 	} else {
-		data, err := json.Marshal(parameters)
+		var data []byte
+		data, err = json.Marshal(parameters)
 		if err != nil {
 			log.GetLogger().WithFields(logrus.Fields{
 				"parameters": parameters,
 			}).WithError(err).Errorln("marshal error")
 			return err
 		}
-		response, err = HttpPostWithTimeout(url, string(data), "", apiTimeout, noLog)
+		response, err = HttpPostWithTimeout(url, string(data), "", apiTimeoutSecond, noLog)
 	}
 	if err != nil {
 		log.GetLogger().WithFields(logrus.Fields{
@@ -294,9 +308,7 @@ func CallApi(httpMethod, url string, parameters map[string]interface{}, respObj 
 			"url":      url,
 			"response": response,
 		}).Errorln("Invalid json response")
-		if err == nil {
-			err = fmt.Errorf("invalid json response: %s", response)
-		}
+		err = fmt.Errorf("invalid json response: %s", response)
 		return err
 	}
 	if err := json.Unmarshal([]byte(response), respObj); err != nil {

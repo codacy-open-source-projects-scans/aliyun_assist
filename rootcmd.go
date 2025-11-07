@@ -14,6 +14,9 @@ import (
 	logrusr "github.com/aliyun/aliyun_assist_client/thirdparty/bombsimon/logrusr/v3"
 	"github.com/aliyun/aliyun_assist_client/thirdparty/service"
 	"github.com/aliyun/aliyun_assist_client/thirdparty/single"
+	"github.com/aliyun/aliyun_assist_client/thirdparty/sirupsen/logrus"
+	"github.com/kirinlabs/HttpRequest"
+	"github.com/tidwall/gjson"
 	"k8s.io/klog/v2"
 
 	"github.com/aliyun/aliyun_assist_client/agent/channel"
@@ -27,6 +30,7 @@ import (
 	"github.com/aliyun/aliyun_assist_client/agent/flagging"
 	"github.com/aliyun/aliyun_assist_client/agent/heartbeat"
 	"github.com/aliyun/aliyun_assist_client/agent/hybrid"
+	"github.com/aliyun/aliyun_assist_client/agent/hybrid/instance"
 	"github.com/aliyun/aliyun_assist_client/agent/install"
 	"github.com/aliyun/aliyun_assist_client/agent/log"
 	"github.com/aliyun/aliyun_assist_client/agent/metrics"
@@ -39,10 +43,12 @@ import (
 	"github.com/aliyun/aliyun_assist_client/agent/util"
 	"github.com/aliyun/aliyun_assist_client/agent/util/daemon"
 	"github.com/aliyun/aliyun_assist_client/agent/util/osutil"
+	"github.com/aliyun/aliyun_assist_client/agent/util/powerutil"
 	"github.com/aliyun/aliyun_assist_client/agent/util/wrapgo"
 	"github.com/aliyun/aliyun_assist_client/agent/version"
 	"github.com/aliyun/aliyun_assist_client/common/pathutil"
 	commander_server "github.com/aliyun/aliyun_assist_client/interprocess/commander/server"
+	configure_server "github.com/aliyun/aliyun_assist_client/interprocess/configure/server"
 	cryptdata_server "github.com/aliyun/aliyun_assist_client/interprocess/cryptdata/server"
 	"github.com/aliyun/aliyun_assist_client/interprocess/messagebus/buses"
 	messagebus_server "github.com/aliyun/aliyun_assist_client/interprocess/messagebus/server"
@@ -274,6 +280,8 @@ func (p *program) run() {
 	G_Running = true
 	G_StopEvent = make(chan struct{})
 
+	initConfiguration(log.GetLogger().WithField("phase", "InitConfig"))
+
 	if err := timermanager.InitTimerManager(); err != nil {
 		log.GetLogger().Fatalln("Failed to initialize timer manager: " + err.Error())
 		return
@@ -319,9 +327,22 @@ func (p *program) run() {
 
 	// Check last panic and report it
 	wrapgo.CallWithPanicHandler(checkagentpanic.CheckAgentPanic, clientreport.LogAndReportIgnorePanic)
-
-	// Check hybrid instance's fingerprint file
-	hybrid.CheckFingerprint()
+	if instance.IsHybrid() {
+		// Check hybrid instance's fingerprint file
+		hybrid.CheckFingerprint()
+		util.SetHTTPPostErrHandler(func(httpResp *HttpRequest.Response, httpErr error) {
+			if httpResp != nil {
+				content, _ := httpResp.Content()
+				respJson := gjson.Parse(content)
+				errMsg := respJson.Get("errMsg")
+				if errMsg.Exists() && errMsg.String() == "instance_deregistered" {
+					log.GetLogger().Info("Clean up hybrid instance info and stop agent process self, because of errMsg: ", errMsg.String())
+					// Service process will be stopped after hybrid.CleanUpRegisterDataAndExit()
+					hybrid.CleanUpRegisterDataAndExit()
+				}
+			}
+		})
+	}
 
 	// Check in main goroutine and update as soon as possible, which use stricter
 	// timeout limitation. NOTE: The preparation phase timeout parameter should
@@ -372,6 +393,7 @@ func (p *program) run() {
 			[]messagebus_server.RegisterFunc{
 				cryptdata_server.RegisterAssistAgentServer,
 				commander_server.RegisterAssistAgentServer,
+				configure_server.RegisterAssistAgentServer,
 			},
 		)
 	})
@@ -470,7 +492,7 @@ func (p *program) Stop(s service.Service) error {
 
 func reportAgentStop(ctx context.Context) {
 	reason := "unknown"
-	shutdown, err := osutil.IsSystemShutdown(ctx)
+	shutdown, err := powerutil.IsSystemShutdown(ctx)
 	if err != nil {
 		log.GetLogger().WithError(err).Error("IsSystemShutdown")
 	} else if shutdown {
@@ -625,4 +647,11 @@ func runRootCommand(ctx *cli.Context, args []string) error {
 		return err
 	}
 	return nil
+}
+
+func initConfiguration(logger logrus.FieldLogger) {
+	flagging.InitConfig(logger)
+	flagging.RegisterCallbackAndApply(logger, map[string]flagging.Callback{
+		flagging.ASSIST_DAEMON_ACTIVE: daemon.OperateAssistDaemon,
+	})
 }

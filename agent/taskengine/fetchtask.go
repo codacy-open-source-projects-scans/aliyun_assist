@@ -33,13 +33,14 @@ type sendFileInfo struct {
 }
 
 type tasks struct {
-	Code          int                      `json:"code"`
-	RunTasks      []taskInfo               `json:"run"`
-	StopTasks     []taskInfo               `json:"stop"`
-	TestTasks     []taskInfo               `json:"test"`
-	SendFileTasks []sendFileInfo           `json:"file"`
-	SessionTasks  []models.SessionTaskInfo `json:"session"`
-	InstanceId    string                   `json:"instanceId"`
+	Code                 int                      `json:"code"`
+	RunTasks             []taskInfo               `json:"run"`
+	StopTasks            []taskInfo               `json:"stop"`
+	TestTasks            []taskInfo               `json:"test"`
+	SendFileTasks        []sendFileInfo           `json:"file"`
+	SessionTasks         []models.SessionTaskInfo `json:"session"`
+	InstanceId           string                   `json:"instanceId"`
+	ConcurrencyTaskQuota int                      `json:"concurrencyTaskQuota"`
 }
 
 type taskCollection struct {
@@ -121,9 +122,9 @@ func parseTaskInfo(jsonStr string) (int, *taskCollection) {
 	return task_lists.Code, taskInfos
 }
 
-func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart bool) *taskCollection {
+func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart bool) (*taskCollection, error) {
 	if util.GetServerHost() == "" {
-		return newTaskCollection()
+		return newTaskCollection(), fmt.Errorf("server host is empty")
 	}
 
 	url := util.GetFetchTaskListService()
@@ -136,7 +137,7 @@ func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart 
 		log.GetLogger().WithFields(logrus.Fields{
 			"reason": reason,
 		}).Errorln("Invalid reason for fetching tasks")
-		return newTaskCollection()
+		return newTaskCollection(), fmt.Errorf("invalid reason for fetching tasks")
 	}
 	if taskType == SessionTaskType {
 		url = util.GetFetchSessionTaskListService()
@@ -147,10 +148,12 @@ func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart 
 		if taskId != "" {
 			url = url + "&taskId=" + taskId
 		}
+		concurrency := GetDispatcher().Concurrency()
+		concurrencyHardLimit := GetDispatcher().MaxConcurrency()
 		// Append Unix timestamp and timezone name of current wall clock
 		currentTime, currentOffsetFromUTC, timezoneName := timetool.NowWithTimezoneName()
 		escapedTimezoneName := neturl.QueryEscape(timezoneName)
-		url += fmt.Sprintf("&currentTime=%d&offset=%d&timeZone=%s", timetool.ToAccurateTime(currentTime), currentOffsetFromUTC, escapedTimezoneName)
+		url += fmt.Sprintf("&currentTime=%d&offset=%d&timeZone=%s&concurrency=%d&concurrencyHardLimit=%d", timetool.ToAccurateTime(currentTime), currentOffsetFromUTC, escapedTimezoneName, concurrency, concurrencyHardLimit)
 	}
 
 	var err error
@@ -164,7 +167,7 @@ func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart 
 			response, err = util.HttpPostWithTimeout(url, "", "", 8, false)
 		}
 		if err != nil {
-			return newTaskCollection()
+			return newTaskCollection(), err
 		}
 		code, taskInfos = parseTaskInfo(response)
 		if code == 408 {
@@ -174,7 +177,7 @@ func FetchTaskList(reason FetchReason, taskId string, taskType int, isColdstart 
 		break
 	}
 
-	return taskInfos
+	return taskInfos, nil
 }
 
 func (t *taskInfo) toRunTaskInfo(instanceId string) (models.RunTaskInfo, error) {
